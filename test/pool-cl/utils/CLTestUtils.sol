@@ -12,6 +12,21 @@ import {CLSwapRouter} from "@pancakeswap/v4-periphery/src/pool-cl/CLSwapRouter.s
 import {NonfungiblePositionManager} from "@pancakeswap/v4-periphery/src/pool-cl/NonfungiblePositionManager.sol";
 import {INonfungiblePositionManager} from
     "@pancakeswap/v4-periphery/src/pool-cl/interfaces/INonfungiblePositionManager.sol";
+import {DummyERC20} from "../../../src/utils/DummyERC20.sol";
+
+library SortTokens2 {
+    function sort(DummyERC20 tokenA, DummyERC20 tokenB)
+        internal
+        pure
+        returns (Currency _currency0, Currency _currency1)
+    {
+        if (address(tokenA) < address(tokenB)) {
+            (_currency0, _currency1) = (Currency.wrap(address(tokenA)), Currency.wrap(address(tokenB)));
+        } else {
+            (_currency0, _currency1) = (Currency.wrap(address(tokenB)), Currency.wrap(address(tokenA)));
+        }
+    }
+}
 
 contract CLTestUtils {
     Vault vault;
@@ -27,8 +42,8 @@ contract CLTestUtils {
         nfp = new NonfungiblePositionManager(vault, poolManager, address(0), address(0));
         swapRouter = new CLSwapRouter(vault, poolManager, address(0));
 
-        MockERC20 token0 = new MockERC20("token0", "T0", 18);
-        MockERC20 token1 = new MockERC20("token1", "T1", 18);
+        DummyERC20 token0 = new DummyERC20("token0", "T0");
+        DummyERC20 token1 = new DummyERC20("token1", "T1");
 
         address[2] memory approvalAddress = [address(nfp), address(swapRouter)];
         for (uint256 i; i < approvalAddress.length; i++) {
@@ -36,7 +51,7 @@ contract CLTestUtils {
             token1.approve(approvalAddress[i], type(uint256).max);
         }
 
-        return SortTokens.sort(token0, token1);
+        return SortTokens2.sort(token0, token1);
     }
 
     function addLiquidity(PoolKey memory key, uint256 amount0, uint256 amount1, int24 tickLower, int24 tickUpper)

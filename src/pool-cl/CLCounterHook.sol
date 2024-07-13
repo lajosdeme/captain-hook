@@ -19,6 +19,33 @@ import {ICLSwapRouterBase} from "@pancakeswap/v4-periphery/src/pool-cl/interface
 import {LiquidityAmounts} from "@pancakeswap/v4-core/test/pool-cl/helpers/LiquidityAmounts.sol";
 import {CLBaseHook} from "./CLBaseHook.sol";
 import {DummyERC20} from "../utils/DummyERC20.sol";
+import "forge-std/console.sol";
+
+library UnsafeMath {
+    /// @notice Returns ceil(x / y)
+    /// @dev division by 0 has unspecified behavior, and must be checked externally
+    /// @param x The dividend
+    /// @param y The divisor
+    /// @return z The quotient, ceil(x / y)
+    function divRoundingUp(uint256 x, uint256 y) internal pure returns (uint256 z) {
+        unchecked {
+            assembly ("memory-safe") {
+                z := add(div(x, y), gt(mod(x, y), 0))
+            }
+        }
+    }
+}
+
+
+/* 
+What parts of it can we make cross-chain?
+
+- deposit collateral definitely: bridge the tokens over via LZ, call depositCollateral
+- withdrawCollateral: can have an option --> Which chain do we want to withdraw it to?
+- can the collateral token be an OFT ????
+
+- LP mint can also be cross-chain if both tokens are OFTs ?
+ */
 
 /// @notice CLCounterHook is a contract that counts the number of times a hook is called
 /// @dev note the code is not production ready, it is only to share how a hook looks like
@@ -69,18 +96,6 @@ contract CLCounterHook is CLBaseHook {
         uint256 startLpMarginFeesPerUnit;
     }
 
-    struct SwapCallbackData {
-        address sender;
-        SwapTestSettings testSettings;
-        PoolKey key;
-        ICLPoolManager.SwapParams params;
-        bytes hookData;
-    }
-
-    struct SwapTestSettings {
-        bool withdrawTokens;
-        bool settleUsingTransfer;
-    }
 
     error TransactionTooOld();
 
@@ -89,7 +104,9 @@ contract CLCounterHook is CLBaseHook {
         _;
     }
 
-    constructor(ICLPoolManager _poolManager) CLBaseHook(_poolManager) {}
+    constructor(ICLPoolManager _poolManager, address _colTokenAddr) CLBaseHook(_poolManager) {
+        colTokenAddr = _colTokenAddr;
+    }
 
     function getHooksRegistrationBitmap() external pure override returns (uint16) {
         return _hooksRegistrationBitmapFrom(
@@ -141,6 +158,8 @@ contract CLCounterHook is CLBaseHook {
 
         (uint160 slot0_sqrtPriceX96, int24 slot0_tick,,) = poolManager.getSlot0(id);
         lpLiqTotal[id] += uint128(liquidityDelta);
+        console.log("SQRT PRICE: ", slot0_sqrtPriceX96);
+        console.log("TICK: ", uint24(slot0_tick));
 
         BalanceDelta deltaPred =
             _lpMintBalanceDelta(tickLower, tickUpper, liquidityDelta, slot0_tick, slot0_sqrtPriceX96);
@@ -152,7 +171,7 @@ contract CLCounterHook is CLBaseHook {
         token1.transferFrom(msg.sender, address(this), uint128(deltaPred.amount1()));
 
         modifyPosition(key, ICLPoolManager.ModifyLiquidityParams(tickLower, tickUpper, liquidityDelta, bytes32(0)), "");
-
+        console.log("position modified");
         // This calculates the LP profits based on the marginFeesPerUnit value at the last time they provided liquidity
         settleLP(id, msg.sender);
 
@@ -493,32 +512,91 @@ contract CLCounterHook is CLBaseHook {
         int128 liquidityDelta,
         int24 slot0_tick,
         uint160 slot0_sqrtPriceX96
-    ) private pure returns (BalanceDelta result) {
+    ) private view returns (BalanceDelta result) {
         if (liquidityDelta != 0) {
             int128 amount0;
             int128 amount1;
             if (slot0_tick < tickLower) {
                 // current tick is below the passed range; liquidity can only become in range by crossing from left to
                 // right, when we'll need _more_ currency0 (it's becoming more valuable) so user must provide it
-                amount0 = SqrtPriceMath.getAmount0Delta(
-                    TickMath.getSqrtRatioAtTick(tickLower), TickMath.getSqrtRatioAtTick(tickUpper), liquidityDelta
-                ).toInt128();
+                uint256 amu = getAmount0Delta(
+                    TickMath.getSqrtRatioAtTick(tickLower), TickMath.getSqrtRatioAtTick(tickUpper), uint128(liquidityDelta), false
+                );
+                amount0 = amu.toInt128();
                 result = result + toBalanceDelta(amount0, 0);
             } else if (slot0_tick < tickUpper) {
-                amount0 = SqrtPriceMath.getAmount0Delta(
-                    slot0_sqrtPriceX96, TickMath.getSqrtRatioAtTick(tickUpper), liquidityDelta
-                ).toInt128();
-                amount1 = SqrtPriceMath.getAmount1Delta(
-                    TickMath.getSqrtRatioAtTick(tickLower), slot0_sqrtPriceX96, liquidityDelta
-                ).toInt128();
+                uint160 reatioattick = TickMath.getSqrtRatioAtTick(tickUpper);
+
+                uint256 amu = getAmount0Delta(
+                    slot0_sqrtPriceX96, reatioattick, uint128(liquidityDelta), false
+                );
+
+                amount0 = amu.toInt128();
+
+                uint256 amu1 = getAmount1Delta(
+                    TickMath.getSqrtRatioAtTick(tickLower), slot0_sqrtPriceX96, uint128(liquidityDelta), false
+                );
+                amount1 = amu1.toInt128();
 
                 result = result + toBalanceDelta(amount0, amount1);
             } else {
-                amount1 = SqrtPriceMath.getAmount1Delta(
-                    TickMath.getSqrtRatioAtTick(tickLower), TickMath.getSqrtRatioAtTick(tickUpper), liquidityDelta
-                ).toInt128();
+                uint256 amu1 = getAmount1Delta(
+                    TickMath.getSqrtRatioAtTick(tickLower), TickMath.getSqrtRatioAtTick(tickUpper), uint128(liquidityDelta), false
+                );
+                amount1 = amu1.toInt128();
+
                 result = result + toBalanceDelta(0, amount1);
             }
+        }
+    }
+
+    function getAmount0Delta(uint160 sqrtRatioAX96, uint160 sqrtRatioBX96, uint128 liquidity, bool roundUp)
+        internal
+        pure
+        returns (uint256 amount0)
+    {
+        unchecked {
+            if (sqrtRatioAX96 > sqrtRatioBX96) (sqrtRatioAX96, sqrtRatioBX96) = (sqrtRatioBX96, sqrtRatioAX96);
+
+            // equivalent: if (sqrtRatioAX96 == 0) revert InvalidPrice();
+            assembly ("memory-safe") {
+                if iszero(sqrtRatioAX96) {
+                    mstore(0, 0x00bfc921) // selector for InvalidPrice()
+                    revert(0x1c, 0x04)
+                }
+            }
+
+            uint256 numerator1 = uint256(liquidity) << FixedPoint96.RESOLUTION;
+            uint256 numerator2 = sqrtRatioBX96 - sqrtRatioAX96;
+
+            return roundUp
+                ? UnsafeMath.divRoundingUp(FullMath.mulDivRoundingUp(numerator1, numerator2, sqrtRatioBX96), sqrtRatioAX96)
+                : FullMath.mulDiv(numerator1, numerator2, sqrtRatioBX96) / sqrtRatioAX96;
+        }
+    }
+
+    function getAmount1Delta(uint160 sqrtRatioAX96, uint160 sqrtRatioBX96, uint128 liquidity, bool roundUp)
+        internal
+        pure
+        returns (uint256 amount1)
+    {
+        uint256 numerator = SqrtPriceMath.absDiff(sqrtRatioAX96, sqrtRatioBX96);
+        uint256 denominator = FixedPoint96.Q96;
+        uint256 _liquidity;
+        assembly ("memory-safe") {
+            // avoid implicit upcasting
+            _liquidity := liquidity
+        }
+        /**
+         * Equivalent to:
+         *   amount1 = roundUp
+         *       ? FullMath.mulDivRoundingUp(liquidity, sqrtRatioBX96 - sqrtRatioAX96, FixedPoint96.Q96)
+         *       : FullMath.mulDiv(liquidity, sqrtRatioBX96 - sqrtRatioAX96, FixedPoint96.Q96);
+         * Cannot overflow because `type(uint128).max * type(uint160).max >> 96 < (1 << 192)`.
+         */
+        amount1 = FullMath.mulDiv(_liquidity, numerator, denominator);
+        assembly ("memory-safe") {
+            amount1 := add(amount1, and(gt(mulmod(_liquidity, numerator, denominator), 0), roundUp))
         }
     }
 

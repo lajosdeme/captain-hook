@@ -25,8 +25,14 @@ import {IVault} from "@pancakeswap/v4-core/src/interfaces/IVault.sol";
 import {ICLHooks} from "@pancakeswap/v4-core/src/pool-cl/interfaces/ICLHooks.sol";
 import {ICLPoolManager} from "@pancakeswap/v4-core/src/pool-cl/interfaces/ICLPoolManager.sol";
 import {CLPoolManager} from "@pancakeswap/v4-core/src/pool-cl/CLPoolManager.sol";
+import {DummyERC20} from "../utils/DummyERC20.sol";
+import {Currency, CurrencyLibrary} from "@pancakeswap/v4-core/src/types/Currency.sol";
+import {CurrencySettlement} from "@pancakeswap/v4-core/test/helpers/CurrencySettlement.sol";
+import "forge-std/console.sol";
 
 abstract contract CLBaseHook is ICLHooks {
+    using CurrencySettlement for Currency;
+
     error NotPoolManager();
     error NotVault();
     error NotSelf();
@@ -51,11 +57,33 @@ abstract contract CLBaseHook is ICLHooks {
         bool afterRemoveLiquidityReturnsDelta;
     }
 
+    struct ModifyPositionCallbackData {
+        address sender;
+        PoolKey key;
+        ICLPoolManager.ModifyLiquidityParams params;
+        bytes hookData;
+    }
+
+    struct SwapCallbackData {
+        address sender;
+        SwapTestSettings testSettings;
+        PoolKey key;
+        ICLPoolManager.SwapParams params;
+        bytes hookData;
+    }
+
+    struct SwapTestSettings {
+        bool withdrawTokens;
+        bool settleUsingTransfer;
+    }
+
     /// @notice The address of the pool manager
     ICLPoolManager public immutable poolManager;
 
     /// @notice The address of the vault
     IVault public immutable vault;
+
+    uint8 whichLock;
 
     constructor(ICLPoolManager _poolManager) {
         poolManager = _poolManager;
@@ -88,14 +116,14 @@ abstract contract CLBaseHook is ICLHooks {
 
     /// @dev Helper function when the hook needs to get a lock from the vault. See
     ///      https://github.com/pancakeswap/pancake-v4-hooks oh hooks which perform vault.lock()
-    function lockAcquired(bytes calldata data) external virtual vaultOnly returns (bytes memory) {
-        (bool success, bytes memory returnData) = address(this).call(data);
-        if (success) return returnData;
-        if (returnData.length == 0) revert LockFailure();
-        // if the call failed, bubble up the reason
-        /// @solidity memory-safe-assembly
-        assembly {
-            revert(add(returnData, 32), mload(returnData))
+    function lockAcquired(bytes calldata rawData) external virtual vaultOnly returns (bytes memory) {
+        (bytes memory action, bytes memory rawCallbackData) = abi.decode(rawData, (bytes, bytes));
+        if (keccak256(action) == keccak256("modifyPosition")) {
+            return modifyPositionCallback(rawCallbackData);
+        } else if (keccak256(action) == keccak256("swap")) {
+            return swapCallback(rawCallbackData);
+        } else {
+            revert("ACTION NOT IMPLEMENTED");
         }
     }
 
@@ -198,5 +226,61 @@ abstract contract CLBaseHook is ICLHooks {
                 | (permissions.afterAddLiquidityReturnsDelta ? 1 << HOOKS_AFTER_ADD_LIQUIDIY_RETURNS_DELTA_OFFSET : 0)
                 | (permissions.afterRemoveLiquidityReturnsDelta ? 1 << HOOKS_AFTER_REMOVE_LIQUIDIY_RETURNS_DELTA_OFFSET : 0)
         );
+    }
+
+    function swapCallback(bytes memory rawData) private returns (bytes memory) {
+        SwapCallbackData memory data = abi.decode(rawData, (SwapCallbackData));
+        console.log("am specified: ", uint256(data.params.amountSpecified));
+
+        BalanceDelta delta = poolManager.swap(data.key, data.params, data.hookData);
+
+        console.log("in swap callback : ", uint128(delta.amount0()));
+        if (data.params.zeroForOne) {
+            if (delta.amount0() < 0) {
+                bool burn = !data.testSettings.settleUsingTransfer;
+                if (burn) {
+                    console.log("burn ?");
+                    vault.transferFrom(data.sender, address(this), data.key.currency0, uint128(-delta.amount0()));
+                    data.key.currency0.settle(vault, address(this), uint128(-delta.amount0()), burn);
+                } else {
+                    console.log("other - doing settle");
+                    data.key.currency0.settle(vault, data.sender, uint128(-delta.amount0()), burn);
+                }
+            }
+
+            bool claims = !data.testSettings.withdrawTokens;
+            if (delta.amount1() > 0) data.key.currency1.take(vault, data.sender, uint128(delta.amount1()), claims);
+        } else {
+            if (delta.amount1() < 0) {
+                bool burn = !data.testSettings.settleUsingTransfer;
+                if (burn) {
+                    console.log("burn 2 ?");
+                    vault.transferFrom(data.sender, address(this), data.key.currency1, uint128(-delta.amount1()));
+                    data.key.currency1.settle(vault, address(this), uint128(-delta.amount1()), burn);
+                } else {
+                    console.log("other - doing settle 2");
+                    data.key.currency1.settle(vault, data.sender, uint128(-delta.amount1()), burn);
+                }
+            }
+
+            bool claims = !data.testSettings.withdrawTokens;
+            if (delta.amount0() > 0) data.key.currency0.take(vault, data.sender, uint128(delta.amount0()), claims);
+        }
+
+        return abi.encode(delta);
+    }
+
+    function modifyPositionCallback(bytes memory rawData) private returns (bytes memory) {
+        ModifyPositionCallbackData memory data = abi.decode(rawData, (ModifyPositionCallbackData));
+
+        // delta already takes feeDelta into account
+        (BalanceDelta delta, BalanceDelta feeDelta) = poolManager.modifyLiquidity(data.key, data.params, data.hookData);
+
+        if (delta.amount0() < 0) data.key.currency0.settle(vault, data.sender, uint128(-delta.amount0()), false);
+        if (delta.amount1() < 0) data.key.currency1.settle(vault, data.sender, uint128(-delta.amount1()), false);
+        if (delta.amount0() > 0) data.key.currency0.take(vault, data.sender, uint128(delta.amount0()), false);
+        if (delta.amount1() > 0) data.key.currency1.take(vault, data.sender, uint128(delta.amount1()), false);
+
+        return abi.encode(delta, feeDelta);
     }
 }
