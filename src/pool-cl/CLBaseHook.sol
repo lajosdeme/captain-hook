@@ -28,7 +28,7 @@ import {CLPoolManager} from "@pancakeswap/v4-core/src/pool-cl/CLPoolManager.sol"
 import {DummyERC20} from "../utils/DummyERC20.sol";
 import {Currency, CurrencyLibrary} from "@pancakeswap/v4-core/src/types/Currency.sol";
 import {CurrencySettlement} from "@pancakeswap/v4-core/test/helpers/CurrencySettlement.sol";
-import "forge-std/console.sol";
+import "./Structs.sol";
 
 abstract contract CLBaseHook is ICLHooks {
     using CurrencySettlement for Currency;
@@ -39,43 +39,6 @@ abstract contract CLBaseHook is ICLHooks {
     error InvalidPool();
     error LockFailure();
     error HookNotImplemented();
-
-    struct Permissions {
-        bool beforeInitialize;
-        bool afterInitialize;
-        bool beforeAddLiquidity;
-        bool afterAddLiquidity;
-        bool beforeRemoveLiquidity;
-        bool afterRemoveLiquidity;
-        bool beforeSwap;
-        bool afterSwap;
-        bool beforeDonate;
-        bool afterDonate;
-        bool beforeSwapReturnsDelta;
-        bool afterSwapReturnsDelta;
-        bool afterAddLiquidityReturnsDelta;
-        bool afterRemoveLiquidityReturnsDelta;
-    }
-
-    struct ModifyPositionCallbackData {
-        address sender;
-        PoolKey key;
-        ICLPoolManager.ModifyLiquidityParams params;
-        bytes hookData;
-    }
-
-    struct SwapCallbackData {
-        address sender;
-        SwapTestSettings testSettings;
-        PoolKey key;
-        ICLPoolManager.SwapParams params;
-        bytes hookData;
-    }
-
-    struct SwapTestSettings {
-        bool withdrawTokens;
-        bool settleUsingTransfer;
-    }
 
     /// @notice The address of the pool manager
     ICLPoolManager public immutable poolManager;
@@ -230,20 +193,16 @@ abstract contract CLBaseHook is ICLHooks {
 
     function swapCallback(bytes memory rawData) private returns (bytes memory) {
         SwapCallbackData memory data = abi.decode(rawData, (SwapCallbackData));
-        console.log("am specified: ", uint256(data.params.amountSpecified));
 
         BalanceDelta delta = poolManager.swap(data.key, data.params, data.hookData);
 
-        console.log("in swap callback : ", uint128(delta.amount0()));
         if (data.params.zeroForOne) {
             if (delta.amount0() < 0) {
                 bool burn = !data.testSettings.settleUsingTransfer;
                 if (burn) {
-                    console.log("burn ?");
                     vault.transferFrom(data.sender, address(this), data.key.currency0, uint128(-delta.amount0()));
                     data.key.currency0.settle(vault, address(this), uint128(-delta.amount0()), burn);
                 } else {
-                    console.log("other - doing settle");
                     data.key.currency0.settle(vault, data.sender, uint128(-delta.amount0()), burn);
                 }
             }
@@ -254,11 +213,9 @@ abstract contract CLBaseHook is ICLHooks {
             if (delta.amount1() < 0) {
                 bool burn = !data.testSettings.settleUsingTransfer;
                 if (burn) {
-                    console.log("burn 2 ?");
                     vault.transferFrom(data.sender, address(this), data.key.currency1, uint128(-delta.amount1()));
                     data.key.currency1.settle(vault, address(this), uint128(-delta.amount1()), burn);
                 } else {
-                    console.log("other - doing settle 2");
                     data.key.currency1.settle(vault, data.sender, uint128(-delta.amount1()), burn);
                 }
             }

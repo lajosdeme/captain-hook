@@ -8,7 +8,7 @@ import {Currency} from "@pancakeswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@pancakeswap/v4-core/src/types/PoolKey.sol";
 import {CLPosition} from "@pancakeswap/v4-core/src/pool-cl/libraries/CLPosition.sol";
 import {CLPoolParametersHelper} from "@pancakeswap/v4-core/src/pool-cl/libraries/CLPoolParametersHelper.sol";
-import {CLCounterHook} from "../../src/pool-cl/CLCounterHook.sol";
+import {CaptainHook} from "../../src/pool-cl/CaptainHook.sol";
 import {CLTestUtils} from "./utils/CLTestUtils.sol";
 import {CLPoolParametersHelper} from "@pancakeswap/v4-core/src/pool-cl/libraries/CLPoolParametersHelper.sol";
 import {PoolIdLibrary} from "@pancakeswap/v4-core/src/types/PoolId.sol";
@@ -18,11 +18,11 @@ import {TickMath} from "@pancakeswap/v4-core/src/pool-cl/libraries/TickMath.sol"
 import {Helper} from "./utils/Users.sol";
 import "forge-std/console.sol";
 
-contract CLCounterHookTest is Helper, CLTestUtils {
+contract CaptainHookTest is Helper, CLTestUtils {
     using PoolIdLibrary for PoolKey;
     using CLPoolParametersHelper for bytes32;
 
-    CLCounterHook perpHook;
+    CaptainHook perpHook;
     Currency currency0;
     Currency currency1;
     PoolKey key;
@@ -30,7 +30,7 @@ contract CLCounterHookTest is Helper, CLTestUtils {
     function setUp() public {
         vm.startPrank(dev);
         (currency0, currency1) = deployContractsWithTokens();
-        perpHook = new CLCounterHook(poolManager, Currency.unwrap(currency0));
+        perpHook = new CaptainHook(poolManager, Currency.unwrap(currency0));
 
         MockERC20 token = MockERC20(Currency.unwrap(currency0));
         MockERC20 token1 = MockERC20(Currency.unwrap(currency1));
